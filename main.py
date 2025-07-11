@@ -2,20 +2,13 @@ import os
 import time
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from dotenv import load_dotenv
 import requests
-
-# Завантажуємо .env при локальному тестуванні (на Render ця змінна середовища читається автоматично)
-load_dotenv()
 
 app = FastAPI()
 CLOUDCONVERT_API_KEY = os.getenv("CLOUDCONVERT_API_KEY")
 
 @app.get("/health")
 def health_check():
-    """
-    Перевірка стану сервісу й коректності ключа.
-    """
     return {
         "status": "ok",
         "has_key": bool(CLOUDCONVERT_API_KEY),
@@ -28,17 +21,11 @@ class PdfRequest(BaseModel):
 
 @app.post("/generate")
 def generate_pdf(data: PdfRequest):
-    """
-    Приймає JSON { title, content }, відправляє job у CloudConvert,
-    чекає на завершення і повертає пряме посилання на PDF.
-    """
     if not CLOUDCONVERT_API_KEY:
         raise HTTPException(500, detail="CloudConvert API key not configured")
 
-    # Формуємо HTML
     html = f"<h1>{data.title}</h1><div>{data.content.replace(chr(10), '<br>')}</div>"
 
-    # Створюємо Job
     payload = {
         "tasks": {
             "html": {
@@ -54,7 +41,7 @@ def generate_pdf(data: PdfRequest):
             "export": {
                 "operation": "export/url",
                 "input": "pdf",
-                "inline": True   # повернути пряме посилання
+                "inline": True
             }
         }
     }
@@ -70,13 +57,9 @@ def generate_pdf(data: PdfRequest):
     job = resp.json()["data"]
     job_id = job["id"]
 
-    # Чекаємо завершення завдання (до 30 секунд)
     for _ in range(30):
         time.sleep(1)
-        status_resp = requests.get(f"https://api.cloudconvert.com/v2/jobs/{job_id}", headers=headers)
-        if status_resp.status_code != 200:
-            continue
-        status = status_resp.json()["data"]
+        status = requests.get(f"https://api.cloudconvert.com/v2/jobs/{job_id}", headers=headers).json()["data"]
         if status["status"] == "finished":
             break
         if status["status"] == "error":
@@ -84,13 +67,8 @@ def generate_pdf(data: PdfRequest):
     else:
         raise HTTPException(500, detail="CloudConvert job did not finish in time")
 
-    # Знаходимо export-задачу та дістаємо URL
-    export_task = next(
-        (t for t in status["tasks"] if t["operation"] == "export/url"),
-        None
-    )
+    export_task = next((t for t in status["tasks"] if t["operation"] == "export/url"), None)
     if not export_task or "result" not in export_task:
-        raise HTTPException(500, detail="Export task missing in job response")
+        raise HTTPException(500, detail="Export task missing")
 
-    file_url = export_task["result"]["files"][0]["url"]
-    return {"url": file_url}
+    return {"url": export_task["result"]["files"][0]["url"]}
