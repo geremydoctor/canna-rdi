@@ -1,7 +1,7 @@
 import re
-import tempfile
+import io
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import markdown
 from bs4 import BeautifulSoup, NavigableString, Tag
@@ -23,44 +23,37 @@ def slugify(text: str) -> str:
     return re.sub(r'[^A-Za-z0-9]+', '_', text).strip('_') or 'document'
 
 def add_html_to_doc(doc: Document, html: str):
-    """
-    Конвертує HTML (згенерований markdown) у абзаци та стилі DOCX.
-    """
     soup = BeautifulSoup(html, "html.parser")
     for elem in soup.children:
         if isinstance(elem, NavigableString):
             doc.add_paragraph(str(elem))
-        elif not isinstance(elem, Tag):
             continue
-        # заголовки
+        if not isinstance(elem, Tag):
+            continue
+
         if elem.name == "h1":
             doc.add_heading(elem.get_text(), level=2)
         elif elem.name in ("h2", "h3"):
-            level = 3 if elem.name == "h3" else 3
-            doc.add_heading(elem.get_text(), level=level)
-        # списки
+            doc.add_heading(elem.get_text(), level=3)
         elif elem.name == "ul":
             for li in elem.find_all("li", recursive=False):
-                p = doc.add_paragraph(li.get_text(), style="List Bullet")
+                doc.add_paragraph(li.get_text(), style="List Bullet")
         elif elem.name == "ol":
             for li in elem.find_all("li", recursive=False):
-                p = doc.add_paragraph(li.get_text(), style="List Number")
-        # блок коду
+                doc.add_paragraph(li.get_text(), style="List Number")
         elif elem.name == "pre":
             code = elem.get_text()
             p = doc.add_paragraph()
             run = p.add_run(code)
             run.font.name = "Courier New"
             run.font.size = Pt(10)
-        # параграф із внутрішнім форматуванням
         else:
             p = doc.add_paragraph()
             def recurse(node):
                 if isinstance(node, NavigableString):
                     p.add_run(str(node))
                 elif isinstance(node, Tag):
-                    text = node.get_text()
-                    run = p.add_run(text)
+                    run = p.add_run(node.get_text())
                     if node.name in ("strong", "b"):
                         run.bold = True
                     if node.name in ("em", "i"):
@@ -68,7 +61,6 @@ def add_html_to_doc(doc: Document, html: str):
                     if node.name == "code":
                         run.font.name = "Courier New"
                         run.font.size = Pt(10)
-                    # рекурсивно для вкладених елементів
                     for child in node.contents:
                         recurse(child)
             for child in elem.contents:
@@ -77,43 +69,38 @@ def add_html_to_doc(doc: Document, html: str):
 @app.post("/compileChatToDocx")
 def compile_chat(req: CompileRequest):
     """
-    Приймає title та масив повідомлень {speaker, text, timestamp},
-    формує DOCX з розділом на кожне повідомлення, зберігає стилі Markdown та емодзі,
-    повертає файл через FileResponse.
+    Приймає title та масив повідомлень, збирає DOCX в пам’яті та повертає його як attachment.
     """
     try:
         doc = Document()
-        # Титулка
         doc.add_heading(req.title, level=1)
 
         for msg in req.messages:
-            # header: Speaker [timestamp]:
-            header = msg.speaker
-            if msg.timestamp:
-                header += f" [{msg.timestamp}]"
+            header = msg.speaker + (f" [{msg.timestamp}]" if msg.timestamp else "")
             p = doc.add_paragraph()
-            r = p.add_run(header + ": ")
-            r.bold = True
+            run = p.add_run(header + ": ")
+            run.bold = True
 
-            # конвертуємо Markdown → HTML → DOCX
             html = markdown.markdown(
-                msg.text, 
+                msg.text,
                 extensions=["extra", "sane_lists", "fenced_code"]
             )
-            # додаємо внутрішню частину тієї ж абзаци
             add_html_to_doc(doc, html)
 
-        # зберігаємо тимчасово
-        slug = slugify(req.title)
-        tmp = tempfile.NamedTemporaryFile(suffix=".docx", delete=False)
-        path = tmp.name
-        tmp.close()
-        doc.save(path)
+        # Збережемо у BytesIO
+        bio = io.BytesIO()
+        doc.save(bio)
+        bio.seek(0)
 
-        return FileResponse(
-            path,
+        filename = f"{slugify(req.title)}.docx"
+        headers = {
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        }
+        return StreamingResponse(
+            bio,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            filename=f"{slug}.docx"
+            headers=headers
         )
+
     except Exception as e:
         raise HTTPException(500, detail=str(e))
