@@ -3,3 +3,4 @@ uvicorn
 requests
 python-docx
 markdown
+beautifulsoup4
