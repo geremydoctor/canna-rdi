@@ -3,8 +3,8 @@ import re
 import tempfile
 import traceback
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
-import requests
 import markdown
 from docx import Document
 from bs4 import BeautifulSoup
@@ -21,6 +21,9 @@ class PdfRequest(BaseModel):
 
 @app.post("/generate-docx")
 def generate_docx(data: PdfRequest):
+    """
+    Створюємо .docx і повертаємо як файл.
+    """
     try:
         # 1) Створюємо Word-документ
         doc = Document()
@@ -32,9 +35,11 @@ def generate_docx(data: PdfRequest):
                 doc.add_paragraph(line)
 
         # 2) Markdown → HTML → текстові блоки
-        html = markdown.markdown(data.content, extensions=["extra", "sane_lists", "fenced_code"])
+        html = markdown.markdown(
+            data.content,
+            extensions=["extra", "sane_lists", "fenced_code"]
+        )
         soup = BeautifulSoup(html, "html.parser")
-
         for elem in soup.find_all(["h1","h2","h3","p","li","pre","code"]):
             text = elem.get_text()
             if elem.name.startswith("h"):
@@ -43,25 +48,20 @@ def generate_docx(data: PdfRequest):
             else:
                 doc.add_paragraph(text)
 
-        # 3) Зберігаємо файл тимчасово
+        # 3) Зберігаємо локально у тимчасовий файл
         slug = slugify(data.title)
         tmp = tempfile.NamedTemporaryFile(suffix=".docx", delete=False)
         tmp_path = tmp.name
         tmp.close()
         doc.save(tmp_path)
 
-        # 4) Завантажуємо на transfer.sh
-        with open(tmp_path, "rb") as f:
-            resp = requests.put(f"https://transfer.sh/{slug}.docx", data=f)
-        if resp.status_code not in (200, 201):
-            raise HTTPException(500, detail=f"Upload failed: {resp.status_code} {resp.text}")
-
-        url = resp.text.strip()
-        return {"url": url}
+        # 4) Повертаємо файл напряму через FileResponse
+        return FileResponse(
+            tmp_path,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename=f"{slug}.docx"
+        )
 
     except Exception as e:
-        # Друк повного трабеку в логах Render
-        print("=== Exception in /generate-docx ===")
         traceback.print_exc()
-        # Повертаємо клієнту помилку з текстом
         raise HTTPException(500, detail=str(e))
